@@ -136,7 +136,7 @@ function [FL_prime, FD_prime, Fz_prime, Ftheta_prime, Urel, AoA, CD_values, CL_v
     phi = atan2(Uz, Utheta); % Finding phi from inverse tangent of Uz and Utheta
 
     % Angle of Attack 
-    AoA = phi - deg2rad(pitch) - twist; % Determining AoA (twist is already in radians)
+    AoA = phi - deg2rad(pitch); % Determining AoA (twist is already in radians)
     AoA_deg = rad2deg(AoA); % Convert AoA to degrees
     
     % Calculating drag and lift coefficients for each section of the blade
