@@ -1,0 +1,439 @@
+%% Wind Turbine Project
+clc
+clear   
+
+%% Import all Data and Variables
+% Turbine Operational Values
+power_rated = 2.5e6; % [W] rated turbine power
+R = 48; % [m] blade radius
+hub_height = 80.4; % [m] hub height
+speed_cut_in = 4; % [m/s] cut in wind speed
+speed_rated = 11; % [m/s] rated wind speed
+speed_cut_out = 25; % [m/s] cut out wind speed
+rotor_speed_range = [9.6, 15.5]; % [RPM] min and max rotor speed
+n_blades = 3; % number of blades
+alpha = 1/3; % axial induction factor [-] 
+
+% Fluid and Material Properties
+dens_air = 1.1; % [kg/m^3] air density
+visc_air = 8e-5; % [N s/m^2] dynamic viscosity of air
+dens_steel = 7850; % [kg/m^3] steel density
+strength_tens_steel = 450e6; % [Pa] tensile strength of steel
+strength_yield_steel = 345e6; % [Pa] yield strength of steel
+
+% Import Turbine Data
+Blade_data = readtable('BladeProfile.csv'); % Blade data
+tower_data = readtable('towerSpecs.csv'); % Tower data
+
+% Airfoil Data stored in structure 
+airfoils = struct();
+airfoils.DU91 = readtable('DU91-W2-250.csv');
+airfoils.DU93 = readtable('DU93-W-210.csv');
+airfoils.DU96 = readtable('DU96-W-180.csv');
+airfoils.DU97 = readtable('DU97-W-300.csv');
+
+% Convert mm to m and store blade data 
+radius = Blade_data.DistanceFromCenterOfRotation/1000; % [m]
+chord  = Blade_data.ChordLength/1000; % [m]
+twist  = deg2rad(Blade_data.BladeTwist); % [rad]
+airfoil_type = Blade_data.Airfoil;
+
+% Calculate swept area of turbine blades
+area_swept = pi*(R^2);
+
+%% Determining coefficient of power and coefficient of thrust (deliverable 1)
+wind_vel = 10; % [m/s]
+rot_velocity = 14*(pi/30); % [rad/s]
+pitch = 0; % [deg]
+
+% Calculate angular induction factors and speed ratios using function
+[alpha_prime_r, lambda_r, lambda] = calculateInductionFactors(radius, wind_vel, rot_velocity, alpha);
+
+% Define number of sections in the blade's data
+sections = height(Blade_data);
+
+% Calculate drag, lift, z, and theta  forces per unit length
+[FL_prime, FD_prime, Fz_prime, Ftheta_prime, Urel, AoA, CD_r, CL_r] = calculateDragLift( ...
+    wind_vel, rot_velocity, radius, alpha, alpha_prime_r, pitch, twist, chord, ...
+    dens_air, visc_air, sections, airfoil_type, airfoils);
+
+% Determine force generated from blades
+force_1_blade = cumtrapz(radius, Fz_prime); % integration of z force/length along blade, factored by 3 blades
+torque_1_blade = cumtrapz(radius, (radius.*Ftheta_prime)); % integration of theta force/length along blade multiplied by radius, factored by 3 blades
+
+F = n_blades*max(force_1_blade);
+T = n_blades*max(torque_1_blade);
+
+Coeff_thrust = 2*F/(dens_air*(wind_vel^2)*area_swept);
+Coeff_power = 2*T*rot_velocity/(dens_air*(wind_vel^3)*area_swept);
+
+fprintf('Coefficent of Power: %.3f\n', Coeff_power);
+fprintf('Coefficent of Thrust: %.3f\n', Coeff_thrust);
+
+%% Plots for deliverable 1
+% Plotting drag and lift coefficients across blade radius
+figure()
+plot(radius, CD_r, 'k-.', 'LineWidth', 1.5)
+hold on
+plot(radius, CL_r, 'k-','LineWidth', 1.5)
+xlim([0 48])
+xticks([0 4 8 12 16 20 24 28 32 36 40 44 48])
+xlabel('Blade Radius (m)')
+ylim([0 1.6])
+ylabel('Coeffcient Value')
+legend('Drag Coeffcient', 'Lift Coeffcient', 'Location','east')
+
+% plotting torque and force across blade radius 
+figure()
+subplot(2,1,1)
+plot(radius, force_1_blade/1000, 'k-','LineWidth', 1.5)
+xlim([0 48])
+xticks(0:4:48)
+xlabel('Blade Radius (m)')
+ylim([0 100])
+ylabel('Force along Blade (kN)')
+
+subplot(2,1,2)
+plot(radius, torque_1_blade/1000, 'k-','LineWidth', 1.5)
+xlim([0 48])
+xticks(0:4:48)
+xlabel('Blade Radius (m)')
+ylim([0 400])
+ylabel('Torque along Blade (kNm)')
+
+%% Optimizing blade pitch angle for max CP, with set tip speed ratio and velocity (deliverable 2)
+% Deliverable 2 specific parameters
+
+wind_vel_d2 = 10; % Set wind velocity [m/s]
+lambda_d2 = 5; % Set tip speed ratio 
+rot_velocity_d2 = (lambda_d2*wind_vel_d2/R)*pi/30; % Determining the rotational velocity based on tip speed ratio and wind velocity [rad/s]
+
+% 
+
+%% Functions
+% Calculates local speed ratio, lambda_r, tip speed ratio, lambda, and
+% local angular induction factor, alpha_prime
+function [alpha_prime_r, lambda_r, lambda] = calculateInductionFactors(radius, wind_vel, rot_velocity, alpha)
+   
+    lambda_r = (rot_velocity.*radius)/wind_vel;
+    lambda = max(lambda_r);
+    
+    alpha_prime_r = 0.5*(-1 + sqrt(1 + (4./(lambda_r.^2))*alpha*(1 - alpha)));
+end
+
+% Calculates the lift, drag, z, and theta forces per unit length of the blade
+function [FL_prime, FD_prime, Fz_prime, Ftheta_prime, Urel, AoA, CD_values, CL_values] = calculateDragLift( ...
+    U, omega, r, alpha, alpha_prime, pitch, twist, chord, density, viscosity, sections, names, airfoils)
+    
+    % Calculating velocities along z and theta axes
+    Uz = U.*(1 - alpha); % Velocity along z axis
+    Utheta = r.*omega.*(1 + alpha_prime);  % Velocity along theta axis 
+    
+    % Calculating the magnitude of the relative wind velocity
+    Urel = sqrt(Uz.^2 + Utheta.^2); % Pythagoren theorem to calculate the relative velocity magnitude
+
+    % Calculating phi, angle of relative wind
+    phi = atan2(Uz, Utheta); % Finding phi from inverse tangent of Uz and Utheta
+
+    % Angle of Attack 
+    AoA = phi - deg2rad(pitch)-twist; % Determining AoA (twist is already in radians)
+    AoA_deg = rad2deg(AoA); % Convert AoA to degrees
+    
+    % Calculating drag and lift coefficients for each section of the blade
+    CL_values = zeros(sections, 1); % Empty array to fill with drag coefficeint vlaues
+    CD_values = zeros(sections, 1); % Empty array to fill with lift coefficeint vlaues
+
+    % Loop of each section along the blade to select airfoil data and
+    % determine coefficients of lift and drag
+
+    for i = 1:sections
+        section_airfoil = char(names(i));
+        c_AoA = AoA_deg(i); % AoA that is being looped through
+    
+        % Determine CD and CL for cylindrical blade sections using
+        % Reynold's Number 
+        if contains(section_airfoil, 'circle')
+            CL_values(i) = 0; % Lift is zero at Cylindrical section
+            
+            % Compute Reynolds number based on relative velocity and
+            % characteristic legnth (chord distance)
+            Re = (density*Urel(i)*chord(i))/viscosity;
+            
+            % Calculate Drag Coefficient via cylinder drag coefficient function
+            CD_values(i) = cylinderCD(Re);
+
+        % Matching airfoil tables and storing CL and CD
+        elseif contains(section_airfoil, 'DU 91-W2-250')
+            airfoil_table = airfoils.DU91;
+            CL_values(i) = interp1(airfoil_table.AoA, airfoil_table.CL, c_AoA, 'linear');
+            CD_values(i) = interp1(airfoil_table.AoA, airfoil_table.CD, c_AoA, 'linear');
+            
+        elseif contains(section_airfoil, 'DU 93-W-210')
+            airfoil_table = airfoils.DU93;
+            CL_values(i) = interp1(airfoil_table.AoA, airfoil_table.CL, c_AoA, 'linear');
+            CD_values(i) = interp1(airfoil_table.AoA, airfoil_table.CD, c_AoA, 'linear');
+            
+        elseif contains(section_airfoil, 'DU 96-W-180')
+            airfoil_table = airfoils.DU96;
+            CL_values(i) = interp1(airfoil_table.AoA, airfoil_table.CL, c_AoA, 'linear');
+            CD_values(i) = interp1(airfoil_table.AoA, airfoil_table.CD, c_AoA, 'linear');
+            
+        elseif contains(section_airfoil, 'DU 97-W-300')
+            airfoil_table = airfoils.DU97;
+            CL_values(i) = interp1(airfoil_table.AoA, airfoil_table.CL, c_AoA, 'linear');
+            CD_values(i) = interp1(airfoil_table.AoA, airfoil_table.CD, c_AoA, 'linear');
+        end
+    end
+    
+    % Determing drag force/length along blade and lift force/legnth along
+    % blade
+    FL_prime = 0.5*density.*(Urel.^2).*chord.*CL_values; % Lift force/length [N/m]
+    FD_prime = 0.5*density.*(Urel.^2).*chord.*CD_values; % Drag force/length [N/m]
+    
+    % Converting Lift and Drag into z and theta forces 
+    Fz_prime = FL_prime.*cos(phi) + FD_prime.*sin(phi); % Using trig to determine z force 
+    Ftheta_prime = FL_prime.*sin(phi) - FD_prime.*cos(phi); % Using trig to determine theta force
+end
+
+
+function [C_D] = cylinderCD(Re)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% FUNCTION NAME: cylinderCD
+%
+% PURPOSE:
+% To calculate and return the coeffecient of drag for a cyliner in cross
+% flow.
+%
+% Fit functions can be found in references:
+%
+% - White, F.M. (2006) Viscous Fluid Flow. 3rd Edition, McGraw-Hill, Boston.
+% - Nian-Sheng Cheng, *Calculation of Drag Coefficient for Arrays of ...
+% Emergent Circular Cylinders with Pseudofluid Model.*...
+% J. Hydraul. Eng. 2013.139:602-611.
+%
+% INPUT
+% Re - Reynolds number [-]
+%
+% OUTPUT
+% C_D - drag coeffecient [-]
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% AUTHOR: MJA
+% DATE: 2024.10.21
+%
+% DESCRIPTION OF LOCAL VARIABLES
+%
+%
+% FUNCTIONS CALLED
+% log10 (MATLAB)
+% tanh (MATLAB)
+%
+% START OF EXECUTABLE CODE
+%
+% piecewise fit functions based on various reynolds number regimes for a
+% cylinder in cross-flow
+    if Re < 2*10^5
+        C_D = 11 * Re.^(-0.75) + 0.9 * (1.0 - exp(-1000./Re))...
+        + 1.2 * (1.0 -exp(-(Re./4500).^0.7));
+    elseif Re <= 5*10^5
+        C_D = 10.^(0.32*tanh(44.4504 - 8 * log10 (Re))-0.238793158);
+    else
+        C_D = 0.1 * log10(Re) - 0.2533429;
+    end
+end
+
+
+%% Deliverable 2: Maximize CP at assigned wind speed and TSR
+
+wind_vel_d2 = 7.6;       % [m/s]
+lambda_d2 = 6.61;        % Tip speed ratio
+omega_d2 = lambda_d2*wind_vel_d2/R; % [rad/s]
+
+pitch_angles_d2 = 0:0.5:30; % [degrees]
+CP_d2 = NaN(size(pitch_angles_d2));
+
+for i = 1:length(pitch_angles_d2)
+
+    P = calculateTurbinePower( ...
+        wind_vel_d2, omega_d2, pitch_angles_d2(i), ...
+        radius, chord, twist, alpha, dens_air, ...
+        visc_air, sections, airfoil_type, airfoils, n_blades);
+
+    CP_d2(i) = P/(0.5*dens_air*wind_vel_d2^3*area_swept);
+end
+
+valid = isfinite(CP_d2);
+
+if any(valid)
+    valid_indices = find(valid);
+    [CP_max_d2, local_index] = max(CP_d2(valid));
+    index_max = valid_indices(local_index);
+    pitch_max_d2 = pitch_angles_d2(index_max);
+
+    fprintf('\nDeliverable 2 Results\n');
+    fprintf('Wind velocity: %.2f m/s\n', wind_vel_d2);
+    fprintf('Tip speed ratio: %.2f\n', lambda_d2);
+    fprintf('Maximum CP: %.4f\n', CP_max_d2);
+    fprintf('Pitch angle at maximum CP: %.1f degrees\n', pitch_max_d2);
+
+    figure;
+    plot(pitch_angles_d2, CP_d2, 'k-o');
+    xlabel('Blade Pitch Angle (deg)');
+    ylabel('Coefficient of Power, C_P');
+    title('C_P vs. Blade Pitch Angle');
+    grid on;
+else
+    fprintf('Deliverable 2: No valid CP values. Check airfoil interpolation.\n');
+end
+
+%% Deliverable 3: Maximize CP by sweeping pitch and TSR
+
+wind_vel_d3 = 7.6; % [m/s]
+lambda_values_d3 = 1:0.25:12;
+pitch_angles_d3 = 0:0.5:30;
+
+CP_d3 = NaN(length(lambda_values_d3), length(pitch_angles_d3));
+
+for i = 1:length(lambda_values_d3)
+
+    % TSR = omega*R/V, so omega = TSR*V/R
+    omega = lambda_values_d3(i)*wind_vel_d3/R;
+
+    % Skip rotational speeds outside the turbine's specified range
+    rpm = omega*30/pi;
+    if rpm < rotor_speed_range(1) || rpm > rotor_speed_range(2)
+        continue
+    end
+
+    for j = 1:length(pitch_angles_d3)
+
+        P = calculateTurbinePower( ...
+            wind_vel_d3, omega, pitch_angles_d3(j), ...
+            radius, chord, twist, alpha, dens_air, ...
+            visc_air, sections, airfoil_type, airfoils, n_blades);
+
+        CP_d3(i,j) = P/(0.5*dens_air*wind_vel_d3^3*area_swept);
+    end
+end
+
+valid = isfinite(CP_d3);
+
+if any(valid(:))
+    CP_temp = CP_d3;
+    CP_temp(~valid) = -Inf;
+    [CP_max_d3, linear_index] = max(CP_temp(:));
+    [lambda_index, pitch_index] = ind2sub(size(CP_temp), linear_index);
+
+    lambda_max_d3 = lambda_values_d3(lambda_index);
+    pitch_max_d3 = pitch_angles_d3(pitch_index);
+    rpm_max_d3 = lambda_max_d3*wind_vel_d3/R*30/pi;
+
+    fprintf('\nDeliverable 3 Results\n');
+    fprintf('Maximum CP: %.4f\n', CP_max_d3);
+    fprintf('Optimal TSR: %.2f\n', lambda_max_d3);
+    fprintf('Optimal pitch angle: %.1f degrees\n', pitch_max_d3);
+    fprintf('Corresponding rotor speed: %.2f RPM\n', rpm_max_d3);
+
+%     figure;
+%     imagesc(pitch_angles_d3, lambda_values_d3, CP_d3);
+%     set(gca, 'YDir', 'normal');
+%     xlabel('Blade Pitch Angle (deg)');
+%     ylabel('Tip Speed Ratio');
+%     title('C_P vs. Pitch Angle and Tip Speed Ratio');
+%     colorbar;
+ else
+%     fprintf('Deliverable 3: No valid CP values. Check airfoil interpolation and rotor-speed limits.\n');
+end
+
+%% Deliverable 4: Determine Required Blade Pitch Angle
+
+% Define the wind speed range from rated to cut-out speed (m/s)
+wind_speeds_d4 = 11:0.5:25;
+
+% Define the range of blade pitch angles to test (degrees)
+pitch_angles_d4 = 0:0.1:360;
+
+% Set initial values for the required pitch angle and maximum power
+required_pitch_d4 = NaN;
+max_power_d4 = NaN;
+
+% Test each pitch angle, starting from the smallest
+for pitch = pitch_angles_d4
+
+    % Reset maximum power for the current pitch angle
+    maximum_power = 0;
+
+    % Check turbine power at each wind speed
+    for V = wind_speeds_d4
+
+        % Convert the constant rotor speed of 15.5 RPM to rad/s
+        omega = 15.5*pi/30;
+
+        % Calculate turbine power at the current wind speed and pitch
+        P = calculateTurbinePower(V, omega, pitch, ...
+            radius, chord, twist, alpha, dens_air, ...
+            visc_air, sections, airfoil_type, airfoils, n_blades);
+
+        % Stop testing this pitch angle if the power is invalid
+        if ~isfinite(P)
+            maximum_power = NaN;
+            break
+        end
+
+        % Update the maximum power for this pitch angle
+        maximum_power = max(maximum_power, P);
+    end
+
+    % Check whether the maximum power is within the rated limit
+    if isfinite(maximum_power) && maximum_power <= power_rated
+
+        % Save the first pitch angle that meets the power limit
+        required_pitch_d4 = pitch;
+        max_power_d4 = maximum_power;
+        break
+    end
+end
+
+% Display the results
+if isnan(required_pitch_d4)
+    fprintf('No valid pitch angle found.\n');
+else
+    fprintf('\nDeliverable 4 Results\n');
+    fprintf('Required pitch angle: %.1f degrees\n', ...
+        required_pitch_d4);
+    fprintf('Maximum power in range: %.4f MW\n', ...
+        max_power_d4 / 1e6);
+end
+
+
+%% Function to Calculate Turbine Power
+
+function P = calculateTurbinePower(V, omega, pitch, ...
+    radius, chord, twist, alpha, density, viscosity, ...
+    sections, airfoil_type, airfoils, n_blades)
+
+    % Calculate the induction factors along the blade
+    [alpha_prime_r, ~, ~] = calculateInductionFactors( ...
+        radius, V, omega, alpha);
+
+    % Calculate the tangential force per unit blade length
+    [~, ~, ~, Ftheta_prime, ~, ~, ~, ~] = ...
+        calculateDragLift(V, omega, radius, alpha, ...
+        alpha_prime_r, pitch, twist, chord, density, ...
+        viscosity, sections, airfoil_type, airfoils);
+
+    % Return NaN if any tangential force value is invalid
+    if any(~isfinite(Ftheta_prime))
+        P = NaN;
+        return
+    end
+
+    % Integrate the tangential force along the blade to find torque
+    torque_1_blade = cumtrapz(radius, radius .* Ftheta_prime);
+
+    % Calculate total rotor torque from all blades
+    torque = n_blades * max(torque_1_blade);
+
+    % Calculate power from torque and angular velocity (W)
+    P = torque * omega;
+end
